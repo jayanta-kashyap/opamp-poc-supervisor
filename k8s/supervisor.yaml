@@ -14,10 +14,14 @@ spec:
     spec:
       containers:
         - name: supervisor
-          image: supervisor:local
+          image: supervisor:latest
           imagePullPolicy: Never
+          env:
+            - name: OPAMP_SERVER_URL
+              value: "ws://opamp-server.opamp-system.svc.cluster.local:4320/v1/opamp"
           ports:
             - containerPort: 50051
+            - containerPort: 8080
 ---
 apiVersion: v1
 kind: Service
@@ -30,4 +34,8 @@ spec:
     - name: grpc
       port: 50051
       targetPort: 50051
+      protocol: TCP
+    - name: http
+      port: 8080
+      targetPort: 8080
       protocol: TCP

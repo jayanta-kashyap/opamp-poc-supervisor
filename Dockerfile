@@ -12,4 +12,5 @@ RUN go build -o /out/supervisor ./cmd/supervisor
 # Runtime stage (no base image pulls)
 FROM scratch
 COPY --from=build /out/supervisor /supervisor
+COPY --from=build /src/web /web
 ENTRYPOINT ["/supervisor"]

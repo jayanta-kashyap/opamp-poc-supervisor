@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>OpAMP Supervisor Dashboard</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+        }
+        .agent-card {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            margin: 10px 0;
+            background: #f9f9f9;
+        }
+        .agent-card.connected {
+            border-left: 4px solid #4CAF50;
+        }
+        .agent-card.disconnected {
+            border-left: 4px solid #f44336;
+        }
+        .device-list {
+            margin-top: 20px;
+        }
+        .device-item {
+            padding: 10px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+        }
+        .device-item:hover {
+            background: #f0f0f0;
+        }
+        .device-item.selected {
+            background: #e3f2fd;
+            border-color: #2196F3;
+        }
+        .device-checkbox {
+            margin-right: 10px;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+        .status-online {
+            background: #4CAF50;
+            color: white;
+        }
+        .status-offline {
+            background: #f44336;
+            color: white;
+        }
+        .config-section {
+            margin-top: 30px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .config-textarea {
+            width: 100%;
+            min-height: 300px;
+            font-family: 'Courier New', monospace;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .button {
+            background: #2196F3;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 10px;
+        }
+        .button:hover {
+            background: #1976D2;
+        }
+        .button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .message {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        .message.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .message.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .config-template {
+            margin-top: 15px;
+        }
+        .template-button {
+            background: #4CAF50;
+            color: white;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+            font-size: 14px;
+        }
+        .template-button:hover {
+            background: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎛️ OpAMP Supervisor Dashboard</h1>
+        
+        <div class="agent-card connected">
+            <h2>Supervisor Agent</h2>
+            <p><strong>Status:</strong> <span class="status-badge status-online">Connected to OpAMP Server</span></p>
+            <p><strong>Instance ID:</strong> supervisor-001</p>
+            <p><strong>URL:</strong> <span id="opamp-url">Loading...</span></p>
+        </div>
+
+        <div class="device-list">
+            <h2>Connected Device Agents</h2>
+            <p>Select device(s) to configure:</p>
+            <div id="devices">
+                <!-- Devices will be loaded here -->
+            </div>
+        </div>
+
+        <div class="config-section">
+            <h2>Push Configuration</h2>
+            <p><strong>Selected Devices:</strong> <span id="selected-count">0</span></p>
+            
+            <div class="config-template">
+                <h3>Quick Templates:</h3>
+                <button class="template-button" onclick="loadTemplate('logs')">Enable Logs Pipeline</button>
+                <button class="template-button" onclick="loadTemplate('traces')">Enable Traces Pipeline</button>
+                <button class="template-button" onclick="loadTemplate('both')">Enable Both</button>
+                <button class="template-button" onclick="loadTemplate('basic')">Basic Config</button>
+            </div>
+
+            <textarea id="config" class="config-textarea" placeholder="Enter OTel Collector configuration (YAML format)..."></textarea>
+            
+            <button class="button" onclick="pushConfig()" id="push-button">Push Configuration to Selected Devices</button>
+            
+            <div id="message"></div>
+        </div>
+    </div>
+
+    <script>
+        let devices = [];
+        let selectedDevices = new Set();
+
+        // Initialize dashboard
+        async function init() {
+            await loadDevices();
+            setInterval(loadDevices, 5000); // Refresh every 5 seconds
+        }
+
+        // Load connected devices from supervisor
+        async function loadDevices() {
+            try {
+                const response = await fetch('/api/devices');
+                const data = await response.json();
+                devices = data.devices || [];
+                renderDevices();
+            } catch (error) {
+                console.error('Failed to load devices:', error);
+                // Fallback to mock data for demo
+                devices = [
+                    { id: 'device-1', status: 'connected', version: '1.0.0', platform: 'linux/amd64', lastSeen: new Date() },
+                    { id: 'device-2', status: 'connected', version: '1.0.0', platform: 'linux/amd64', lastSeen: new Date() }
+                ];
+                renderDevices();
+            }
+        }
+
+        // Render device list
+        function renderDevices() {
+            const container = document.getElementById('devices');
+            if (devices.length === 0) {
+                container.innerHTML = '<p style="color: #999;">No devices connected</p>';
+                return;
+            }
+
+            container.innerHTML = devices.map(device => {
+                const isSelected = selectedDevices.has(device.id);
+                const statusClass = device.status === 'connected' ? 'status-online' : 'status-offline';
+                return `
+                    <div class="device-item ${isSelected ? 'selected' : ''}" onclick="toggleDevice('${device.id}')">
+                        <input type="checkbox" class="device-checkbox" ${isSelected ? 'checked' : ''} onclick="event.stopPropagation(); toggleDevice('${device.id}')">
+                        <div>
+                            <strong>${device.id}</strong>
+                            <span class="status-badge ${statusClass}">${device.status}</span>
+                            <br>
+                            <small>Version: ${device.version} | Platform: ${device.platform}</small>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            updateSelectedCount();
+        }
+
+        // Toggle device selection
+        function toggleDevice(deviceId) {
+            if (selectedDevices.has(deviceId)) {
+                selectedDevices.delete(deviceId);
+            } else {
+                selectedDevices.add(deviceId);
+            }
+            renderDevices();
+        }
+
+        // Update selected count
+        function updateSelectedCount() {
+            document.getElementById('selected-count').textContent = selectedDevices.size;
+            document.getElementById('push-button').disabled = selectedDevices.size === 0;
+        }
+
+        // Load config template
+        function loadTemplate(type) {
+            const templates = {
+                logs: `receivers:
+  otlp:
+    protocols:
+      grpc:
+
+processors:
+  batch:
+
+exporters:
+  logging:
+    loglevel: debug
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [logging]`,
+                traces: `receivers:
+  otlp:
+    protocols:
+      grpc:
+
+processors:
+  batch:
+
+exporters:
+  logging:
+    loglevel: debug
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [logging]`,
+                both: `receivers:
+  otlp:
+    protocols:
+      grpc:
+
+processors:
+  batch:
+
+exporters:
+  logging:
+    loglevel: debug
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [logging]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [logging]`,
+                basic: `receivers:
+  otlp:
+    protocols:
+      grpc:
+
+exporters:
+  logging:
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [logging]`
+            };
+
+            document.getElementById('config').value = templates[type] || '';
+        }
+
+        // Push configuration to selected devices
+        async function pushConfig() {
+            const config = document.getElementById('config').value;
+            if (!config.trim()) {
+                showMessage('Please enter a configuration', 'error');
+                return;
+            }
+
+            if (selectedDevices.size === 0) {
+                showMessage('Please select at least one device', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/push-config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        devices: Array.from(selectedDevices),
+                        config: config
+                    })
+                });
+
+                const result = await response.json();
+                if (response.ok) {
+                    showMessage(`✅ Configuration pushed to ${selectedDevices.size} device(s)`, 'success');
+                } else {
+                    showMessage(`❌ Failed to push config: ${result.error}`, 'error');
+                }
+            } catch (error) {
+                console.error('Push failed:', error);
+                showMessage(`❌ Failed to push config: ${error.message}`, 'error');
+            }
+        }
+
+        // Show message
+        function showMessage(text, type) {
+            const msgDiv = document.getElementById('message');
+            msgDiv.innerHTML = `<div class="message ${type}">${text}</div>`;
+            setTimeout(() => {
+                msgDiv.innerHTML = '';
+            }, 5000);
+        }
+
+        // Initialize on load
+        init();
+    </script>
+</body>
+</html>
