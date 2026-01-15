@@ -111,6 +111,7 @@ func (b *RealOpAMPBridge) Start(ctx context.Context) error {
 
 	go b.periodicHealthReport(ctx)
 	go b.periodicDeviceSync(ctx)
+	go b.periodicConfigReport(ctx)
 
 	return nil
 }
@@ -190,6 +191,12 @@ func (b *RealOpAMPBridge) periodicDeviceSync(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (b *RealOpAMPBridge) periodicConfigReport(ctx context.Context) {
+	// Disabled for now - would need device agents to implement GetConfig command
+	// This is a placeholder for future enhancement
+	return
 }
 
 func (b *RealOpAMPBridge) onMessage(ctx context.Context, msg *types.MessageData) {
