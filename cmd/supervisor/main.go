@@ -12,28 +12,55 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"local.dev/opamp-poc-supervisor/api/controlpb"
-	"local.dev/opamp-poc-supervisor/internal/runtime"
-	"local.dev/opamp-poc-supervisor/internal/server"
+	"local.dev/opamp-supervisor/api/controlpb"
+	"local.dev/opamp-supervisor/internal/runtime"
+	"local.dev/opamp-supervisor/internal/server"
 )
 
 func main() {
-	reg := runtime.NewRegistry()
+	// Use persistent registry with state file in /var/lib/supervisor
+	stateFile := os.Getenv("STATE_FILE")
+	if stateFile == "" {
+		stateFile = "/var/lib/supervisor/devices.json"
+	}
+
+	// Ensure state directory exists
+	stateDir := "/var/lib/supervisor"
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		log.Printf("[WARN] Failed to create state directory: %v, using in-memory registry", err)
+		stateFile = "" // Fall back to in-memory
+	}
+
+	var reg *runtime.PersistentRegistry
+	if stateFile != "" {
+		reg = runtime.NewPersistentRegistry(stateFile)
+		log.Printf("Using persistent registry with state file: %s", stateFile)
+	} else {
+		// Fallback: wrap regular registry as persistent (won't actually persist)
+		baseReg := runtime.NewRegistry()
+		reg = &runtime.PersistentRegistry{
+			Registry: baseReg,
+		}
+		log.Printf("Using in-memory registry (no persistence)")
+	}
 
 	var svc *server.ControlService
 	enqueue := func(nodeID string, cmd *controlpb.Command) error {
 		return svc.EnqueueCommand(nodeID, cmd)
 	}
+	enqueueConfigPush := func(nodeID string, cfg *controlpb.ConfigPush) error {
+		return svc.EnqueueConfigPush(nodeID, cfg)
+	}
 
 	// Get OpAMP server URL from environment or use default
 	opampURL := os.Getenv("OPAMP_SERVER_URL")
 	if opampURL == "" {
-		opampURL = "ws://opamp-server.opamp-system.svc.cluster.local:4320/v1/opamp"
+		opampURL = "ws://opamp-server.opamp-control.svc.cluster.local:4320/v1/opamp"
 		log.Printf("OPAMP_SERVER_URL not set, using default: %s", opampURL)
 	}
 
-	// Use real OpAMP bridge instead of stub
-	bridge := server.NewRealOpAMPBridge(opampURL, enqueue, reg.ListNodes)
+	// Use real OpAMP bridge with persistent registry's device list
+	bridge := server.NewRealOpAMPBridge(opampURL, enqueue, enqueueConfigPush, reg.ListConnectedDevices, reg.GetAgentType)
 	svc = server.NewControlService(reg, bridge)
 
 	ctx, cancel := context.WithCancel(context.Background())

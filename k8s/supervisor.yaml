@@ -1,41 +1,59 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: supervisor-state-pvc
+  namespace: opamp-control
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: supervisor
+  name: opamp-supervisor
+  namespace: opamp-control
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: supervisor
+      app: opamp-supervisor
   template:
     metadata:
       labels:
-        app: supervisor
+        app: opamp-supervisor
     spec:
       containers:
         - name: supervisor
-          image: supervisor:latest
+          image: opamp-supervisor:v10
           imagePullPolicy: Never
           env:
             - name: OPAMP_SERVER_URL
-              value: "ws://opamp-server.opamp-system.svc.cluster.local:4320/v1/opamp"
+              value: "ws://opamp-server.opamp-control.svc.cluster.local:4320/v1/opamp"
           ports:
             - containerPort: 50051
             - containerPort: 8080
+          volumeMounts:
+            - name: supervisor-state
+              mountPath: /var/lib/supervisor
+      volumes:
+        - name: supervisor-state
+          persistentVolumeClaim:
+            claimName: supervisor-state-pvc
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: supervisor
+  name: opamp-supervisor
+  namespace: opamp-control
 spec:
+  type: LoadBalancer
   selector:
-    app: supervisor
+    app: opamp-supervisor
   ports:
     - name: grpc
       port: 50051
       targetPort: 50051
-      protocol: TCP
-    - name: http
-      port: 8080
-      targetPort: 8080
       protocol: TCP

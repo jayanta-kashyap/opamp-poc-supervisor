@@ -1,4 +1,4 @@
-module local.dev/opamp-poc-supervisor
+module local.dev/opamp-supervisor
 
 go 1.24.0
 

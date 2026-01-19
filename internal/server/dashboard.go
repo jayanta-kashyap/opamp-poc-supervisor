@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"local.dev/opamp-poc-supervisor/api/controlpb"
-	"local.dev/opamp-poc-supervisor/internal/runtime"
+	"local.dev/opamp-supervisor/api/controlpb"
+	"local.dev/opamp-supervisor/internal/runtime"
 )
 
 type DashboardServer struct {
-	registry *runtime.Registry
+	registry *runtime.PersistentRegistry
 	bridge   OpAMPBridge
 	mu       sync.RWMutex
 	devices  map[string]*DeviceInfo
@@ -26,7 +26,7 @@ type DeviceInfo struct {
 	LastSeen time.Time `json:"lastSeen"`
 }
 
-func NewDashboardServer(registry *runtime.Registry, bridge OpAMPBridge) *DashboardServer {
+func NewDashboardServer(registry *runtime.PersistentRegistry, bridge OpAMPBridge) *DashboardServer {
 	return &DashboardServer{
 		registry: registry,
 		bridge:   bridge,

@@ -12,33 +12,44 @@ import (
 	"github.com/open-telemetry/opamp-go/client/types"
 	"github.com/open-telemetry/opamp-go/protobufs"
 
-	"local.dev/opamp-poc-supervisor/api/controlpb"
+	"local.dev/opamp-supervisor/api/controlpb"
 )
 
 type OpAMPBridge interface {
 	Start(ctx context.Context) error
 	SendStatus(nodeID string, ev *controlpb.Event) error
 	PushCommand(nodeID string, cmd *controlpb.Command) error
+	OnConfigAck(nodeID string, ack *controlpb.ConfigAck) error
 	Stop(ctx context.Context) error
 }
 
 type RealOpAMPBridge struct {
-	serverURL     string
-	enqueue       func(nodeID string, cmd *controlpb.Command) error
-	getDeviceList func() []string
-	mu            sync.RWMutex
-	client        client.OpAMPClient
-	logger        types.Logger
-	instanceID    string
+	serverURL      string
+	enqueue        func(nodeID string, cmd *controlpb.Command) error
+	enqueueConfig  func(nodeID string, cfg *controlpb.ConfigPush) error
+	getDeviceList  func() []string
+	getAgentType   func(nodeID string) string
+	mu             sync.RWMutex
+	client         client.OpAMPClient
+	logger         types.Logger
+	instanceID     string
+	ackStatus      map[string]bool
+	ackHash        map[string]string
+	deviceConfigs  map[string]string
 }
 
-func NewRealOpAMPBridge(serverURL string, enqueue func(nodeID string, cmd *controlpb.Command) error, getDeviceList func() []string) *RealOpAMPBridge {
+func NewRealOpAMPBridge(serverURL string, enqueue func(nodeID string, cmd *controlpb.Command) error, enqueueConfig func(nodeID string, cfg *controlpb.ConfigPush) error, getDeviceList func() []string, getAgentType func(nodeID string) string) *RealOpAMPBridge {
 	return &RealOpAMPBridge{
-		serverURL:     serverURL,
-		enqueue:       enqueue,
-		getDeviceList: getDeviceList,
-		instanceID:    "supervisor-001",
-		logger:        &simpleLogger{},
+		serverURL:      serverURL,
+		enqueue:        enqueue,
+		enqueueConfig:  enqueueConfig,
+		getDeviceList:  getDeviceList,
+		getAgentType:   getAgentType,
+		instanceID:     "supervisor-001",
+		logger:         &simpleLogger{},
+		ackStatus:      make(map[string]bool),
+		ackHash:        make(map[string]string),
+		deviceConfigs:  make(map[string]string),
 	}
 }
 
@@ -151,14 +162,48 @@ func (b *RealOpAMPBridge) updateAgentDescription(opampClient client.OpAMPClient)
 		},
 	}
 
-	// Add each device as a separate attribute
+	// Add each device attributes: id, status, hash, type
 	for i, deviceID := range devices {
 		nonIdentifyingAttrs = append(nonIdentifyingAttrs, &protobufs.KeyValue{
-			Key: "device." + string(rune(i+'0')),
-			Value: &protobufs.AnyValue{
-				Value: &protobufs.AnyValue_StringValue{StringValue: deviceID},
-			},
+			Key:   "device.id." + string(rune(i+'0')),
+			Value: &protobufs.AnyValue{Value: &protobufs.AnyValue_StringValue{StringValue: deviceID}},
 		})
+
+		// Add agent type
+		agentType := b.getAgentType(deviceID)
+		if agentType == "" {
+			agentType = "unknown"
+		}
+		nonIdentifyingAttrs = append(nonIdentifyingAttrs, &protobufs.KeyValue{
+			Key:   "device.type." + deviceID,
+			Value: &protobufs.AnyValue{Value: &protobufs.AnyValue_StringValue{StringValue: agentType}},
+		})
+
+		// Status and hash keyed by device ID for server parsing
+		b.mu.RLock()
+		status, hasStatus := b.ackStatus[deviceID]
+		hash := b.ackHash[deviceID]
+		config := b.deviceConfigs[deviceID]
+		b.mu.RUnlock()
+		if hasStatus {
+			nonIdentifyingAttrs = append(nonIdentifyingAttrs, &protobufs.KeyValue{
+				Key:   "device.status." + deviceID,
+				Value: &protobufs.AnyValue{Value: &protobufs.AnyValue_StringValue{StringValue: map[bool]string{true: "applied", false: "failed"}[status]}},
+			})
+		}
+		if hash != "" {
+			nonIdentifyingAttrs = append(nonIdentifyingAttrs, &protobufs.KeyValue{
+				Key:   "device.hash." + deviceID,
+				Value: &protobufs.AnyValue{Value: &protobufs.AnyValue_StringValue{StringValue: hash}},
+			})
+		}
+		// Send actual device config
+		if config != "" {
+			nonIdentifyingAttrs = append(nonIdentifyingAttrs, &protobufs.KeyValue{
+				Key:   "device.config." + deviceID,
+				Value: &protobufs.AnyValue{Value: &protobufs.AnyValue_StringValue{StringValue: config}},
+			})
+		}
 	}
 
 	log.Printf("[OpAMP] Updating agent description with %d devices: %v", len(devices), devices)
@@ -200,36 +245,33 @@ func (b *RealOpAMPBridge) periodicConfigReport(ctx context.Context) {
 }
 
 func (b *RealOpAMPBridge) onMessage(ctx context.Context, msg *types.MessageData) {
-	if msg.RemoteConfig != nil {
+	if msg.RemoteConfig != nil && msg.RemoteConfig.Config != nil && msg.RemoteConfig.Config.ConfigMap != nil {
 		log.Printf("[OpAMP] Received remote config: %d entries", len(msg.RemoteConfig.Config.ConfigMap))
 
 		for key, cfg := range msg.RemoteConfig.Config.ConfigMap {
-			log.Printf("[OpAMP] Processing config key=%s, body size=%d", key, len(cfg.Body))
-
 			targetDevice := key
-
-			cmd := &controlpb.Command{
-				Type:          "UpdateConfig",
-				Payload:       string(cfg.Body),
-				CorrelationId: time.Now().Format(time.RFC3339Nano),
+			configPush := &controlpb.ConfigPush{
+				DeviceId:   targetDevice,
+				ConfigData: cfg.Body,
+				ConfigHash: string(msg.RemoteConfig.ConfigHash),
+				AgentType:  "otelcol",
 			}
 
-			log.Printf("[OpAMP] Forwarding config to device: %s", targetDevice)
-			if err := b.enqueue(targetDevice, cmd); err != nil {
+			// Store the config so we can report it back
+			b.mu.Lock()
+			b.deviceConfigs[targetDevice] = string(cfg.Body)
+			b.mu.Unlock()
+
+			if err := b.enqueueConfig(targetDevice, configPush); err != nil {
 				log.Printf("[OpAMP] Failed to enqueue config to %s: %v", targetDevice, err)
 			} else {
-				log.Printf("[OpAMP] Successfully queued config for %s", targetDevice)
+				log.Printf("[OpAMP] Queued config for %s (hash=%s, size=%d)", targetDevice, configPush.ConfigHash, len(cfg.Body))
 			}
 		}
 	}
 
 	if msg.AgentIdentification != nil {
-		log.Printf("[OpAMP] Agent identification received: %s", msg.AgentIdentification.NewInstanceUid)
-	}
-
-	if msg.CustomMessage != nil {
-		log.Printf("[OpAMP] Custom message received: capability=%s, type=%s",
-			msg.CustomMessage.Capability, msg.CustomMessage.Type)
+		log.Printf("[OpAMP] Agent identification received")
 	}
 }
 
@@ -281,6 +323,30 @@ func (b *RealOpAMPBridge) PushCommand(nodeID string, cmd *controlpb.Command) err
 	return b.enqueue(nodeID, cmd)
 }
 
+func (b *RealOpAMPBridge) OnConfigAck(nodeID string, ack *controlpb.ConfigAck) error {
+	// Record status/hash and refresh description so server picks up status
+	b.mu.Lock()
+	b.ackStatus[ack.GetDeviceId()] = ack.GetSuccess()
+	b.ackHash[ack.GetDeviceId()] = ack.GetConfigHash()
+	
+	// Store the effective config reported by the device
+	if len(ack.GetEffectiveConfig()) > 0 {
+		b.deviceConfigs[ack.GetDeviceId()] = string(ack.GetEffectiveConfig())
+		log.Printf("[OpAMP] Stored effective config from device %s (%d bytes)", 
+			ack.GetDeviceId(), len(ack.GetEffectiveConfig()))
+	}
+	
+	client := b.client
+	b.mu.Unlock()
+
+	if client != nil {
+		if err := b.updateAgentDescription(client); err != nil {
+			log.Printf("[OpAMP] Failed to refresh agent description on ack: %v", err)
+		}
+	}
+	return nil
+}
+
 func (b *RealOpAMPBridge) Stop(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -330,6 +396,12 @@ func (b *InMemoryBridge) SendStatus(nodeID string, ev *controlpb.Event) error {
 
 func (b *InMemoryBridge) PushCommand(nodeID string, cmd *controlpb.Command) error {
 	return b.enqueue(nodeID, cmd)
+}
+
+func (b *InMemoryBridge) OnConfigAck(nodeID string, ack *controlpb.ConfigAck) error {
+	log.Printf("[OpAMP stub] ConfigAck from %s: device=%s, success=%v, hash=%s, effective_config_size=%d",
+		nodeID, ack.GetDeviceId(), ack.GetSuccess(), ack.GetConfigHash(), len(ack.GetEffectiveConfig()))
+	return nil
 }
 
 func (b *InMemoryBridge) Stop(ctx context.Context) error {

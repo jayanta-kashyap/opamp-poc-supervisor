@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"local.dev/opamp-poc-supervisor/api/controlpb"
+	"local.dev/opamp-supervisor/api/controlpb"
 )
 
 type Stream interface {
@@ -12,39 +12,69 @@ type Stream interface {
 	Context() context.Context
 }
 
+type DeviceInfo struct {
+	Stream    Stream
+	AgentType string
+}
+
 type Registry struct {
 	mu      sync.RWMutex
-	streams map[string]Stream
+	devices map[string]*DeviceInfo
 }
 
 func NewRegistry() *Registry {
-	return &Registry{streams: make(map[string]Stream)}
+	return &Registry{devices: make(map[string]*DeviceInfo)}
 }
 
 func (r *Registry) Upsert(nodeID string, s Stream) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.streams[nodeID] = s
+	if info, ok := r.devices[nodeID]; ok {
+		info.Stream = s
+	} else {
+		r.devices[nodeID] = &DeviceInfo{Stream: s}
+	}
+}
+
+func (r *Registry) SetAgentType(nodeID string, agentType string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if info, ok := r.devices[nodeID]; ok {
+		info.AgentType = agentType
+	} else {
+		r.devices[nodeID] = &DeviceInfo{AgentType: agentType}
+	}
+}
+
+func (r *Registry) GetAgentType(nodeID string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if info, ok := r.devices[nodeID]; ok {
+		return info.AgentType
+	}
+	return ""
 }
 
 func (r *Registry) Get(nodeID string) (Stream, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	s, ok := r.streams[nodeID]
-	return s, ok
+	if info, ok := r.devices[nodeID]; ok && info.Stream != nil {
+		return info.Stream, true
+	}
+	return nil, false
 }
 
 func (r *Registry) Remove(nodeID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.streams, nodeID)
+	delete(r.devices, nodeID)
 }
 
 func (r *Registry) ListNodes() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	nodes := make([]string, 0, len(r.streams))
-	for nodeID := range r.streams {
+	nodes := make([]string, 0, len(r.devices))
+	for nodeID := range r.devices {
 		nodes = append(nodes, nodeID)
 	}
 	return nodes
